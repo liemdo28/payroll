@@ -162,7 +162,8 @@ def _detect_period_end(ord_file: dict, ts_text: str) -> date:
 
 def main():
     ap = argparse.ArgumentParser(description="Raw Sushi Bistro – full payroll pipeline")
-    ap.add_argument("--key",        required=True, help="Service-account JSON key file path")
+    ap.add_argument("--key",        default=cfg.SERVICE_ACCOUNT_KEY,
+                    help=f"Service-account JSON key file (default: {cfg.SERVICE_ACCOUNT_KEY})")
     ap.add_argument("--timesheet",  help="Local timesheet CSV (skips Drive download)")
     ap.add_argument("--orders",     help="Local Order Details CSV (skips Drive download)")
     ap.add_argument("--period-end", help="Period end YYYY-MM-DD (auto-detected if omitted)")
@@ -173,11 +174,18 @@ def main():
                     help="Process and write local CSVs only; skip Sheets upload")
     args = ap.parse_args()
 
+    # Validate key file early (before downloading large CSVs)
+    if not args.no_upload and not args.dry_run and not Path(args.key).exists():
+        print(f"ERROR: Service-account key not found: {args.key}")
+        print("  Pass --key PATH or set SERVICE_ACCOUNT_KEY env var.")
+        print("  Use --no-upload to process without uploading to Sheets.")
+        raise SystemExit(1)
+
     # ── Step 1: Get input CSVs ────────────────────────────────────────────────
     if args.timesheet and args.orders:
         print("  Using local CSV files.")
-        ts_text  = Path(args.timesheet).read_text()
-        ord_text = Path(args.orders).read_text()
+        ts_text  = Path(args.timesheet).read_text(encoding="utf-8", errors="replace")
+        ord_text = Path(args.orders).read_text(encoding="utf-8", errors="replace")
         ord_name = Path(args.orders).name
 
         if args.period_end:

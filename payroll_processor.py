@@ -444,7 +444,7 @@ def compute_kitchen_tips(
     # Accumulate kitchen hours per employee (from individual shifts)
     kitchen_hours: dict[str, float] = defaultdict(float)
     for s in shifts:
-        if _role_cat(s.role) in ("Kitchen", "Dishwasher"):
+        if _role_cat(s.role) == "Kitchen":
             kitchen_hours[s.name] += s.total_hours
 
     total_k_hours = sum(kitchen_hours.values()) or 1.0
@@ -541,7 +541,7 @@ def gen_current_sheet_csv(
             prev = s.name
         w.writerow([
             s.name,
-            s.work_date.strftime("%b %-d %Y"),
+            f"{s.work_date.strftime('%b')} {s.work_date.day} {s.work_date.year}",
             s.clock_in_time.strftime("%I:%M %p").lstrip("0") if s.clock_in_time else "",
             s.role,
             f"${s.wage_rate:.2f}",
@@ -597,7 +597,7 @@ def gen_tip_records_csv(records: list[ServerShiftTip]) -> str:
     for r in records:
         sum_tg = _r(r.card_tip + r.gratuity)
         w.writerow([
-            r.work_date.strftime("%-m/%-d/%Y"),
+            f"{r.work_date.month}/{r.work_date.day}/{r.work_date.year}",
             r.shift, r.job, r.name,
             _fmt_dollar(r.total),
             f"{r.sub:.2f}"     if r.sub     else "",

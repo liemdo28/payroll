@@ -1,0 +1,15 @@
+name = "payroll-dashboard"
+compatibility_date = "2025-01-01"
+
+pages_build_output_dir = "dist"
+
+[vars]
+# Non-secret runtime config (override per environment below)
+PAYROLL_FILE_ID = ""
+ADMIN_FILE_ID   = ""
+
+[env.production.vars]
+# Set these in the Cloudflare dashboard → Pages → Settings → Variables
+# PAYROLL_FILE_ID = "<your-payroll-sheet-id>"
+# ADMIN_FILE_ID   = "<your-admin-sheet-id>"
+# GOOGLE_SA_JSON  = "<service-account JSON, single line, set as secret>"

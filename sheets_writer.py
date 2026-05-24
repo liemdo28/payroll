@@ -42,8 +42,18 @@ def _b64url(data: bytes) -> str:
 
 def get_access_token(key_file: str) -> str:
     """Load a service-account JSON key and return a short-lived OAuth2 token."""
-    with open(key_file) as f:
-        sa = json.load(f)
+    try:
+        with open(key_file, encoding="utf-8") as f:
+            sa = json.load(f)
+    except FileNotFoundError:
+        raise SystemExit(f"Service-account key not found: {key_file}")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"Invalid JSON in {key_file}: {e}")
+
+    try:
+        private_key = rsa.PrivateKey.load_pkcs1_openssl_pem(sa["private_key"].encode())
+    except Exception as e:
+        raise SystemExit(f"Cannot parse private key in {key_file}: {e}")
 
     now = int(time.time())
     header  = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
@@ -56,20 +66,22 @@ def get_access_token(key_file: str) -> str:
     }).encode())
 
     signing_input = f"{header}.{payload}".encode()
-    private_key   = rsa.PrivateKey.load_pkcs1_openssl_pem(
-        sa["private_key"].encode()
-    )
     signature = rsa.sign(signing_input, private_key, "SHA-256")
     jwt_token = f"{header}.{payload}.{_b64url(signature)}"
 
-    body = urllib.parse.urlencode({
+    body_data = urllib.parse.urlencode({
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion":  jwt_token,
     }).encode()
-    req = urllib.request.Request(_TOKEN_URL, data=body,
-                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())["access_token"]
+    req = urllib.request.Request(
+        _TOKEN_URL, data=body_data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())["access_token"]
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Token exchange failed ({e.code}): {e.read().decode()}") from e
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,12 +95,17 @@ def _sheets_request(method: str, url: str, token: str, body: Any = None) -> Any:
         "Content-Type":  "application/json",
     }
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode()
-        raise RuntimeError(f"Sheets API {method} {url} → {e.code}: {detail}") from e
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503) and attempt < 3:
+                time.sleep(2 ** attempt)   # 1 s, 2 s, 4 s back-off
+                continue
+            detail = e.read().decode()
+            raise RuntimeError(f"Sheets API {method} → {e.code}: {detail}") from e
+    raise RuntimeError("Sheets API: max retries exceeded")
 
 
 def get_sheet_metadata(spreadsheet_id: str, token: str) -> dict:
