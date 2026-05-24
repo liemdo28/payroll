@@ -417,38 +417,35 @@ def aggregate_server_tips(records: list[ServerShiftTip]) -> dict[str, dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 # 5 – Kitchen pool & distribution
 #
-# Formula from owner:
-#   T30  = FOH_CardTip × 2/3  −  total_cashier_paid
-#   E89  = total_server_dine_in_val × KITCHEN_SERVER_VAL_FRACTION + T30
-#   Each kitchen employee's tip = (their_hours / total_kitchen_hours) × E89
+# E3   = $F$77 = SUM(F55:F76) = total_server_val (sum of server VAL from tip records)
+# T30  = FOH_CardTip × 2/3 − total_cashier_paid
+# E89  = E3 × KITCHEN_SERVER_VAL_FRACTION (M22) + T30
+# Each kitchen employee tip = (their_hours / total_kitchen_hours) × E89
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_kitchen_tips(
     shifts: list[Shift],
     records: list[ServerShiftTip],
-    ts_totals: dict[str, "EmployeeTotals"],
 ) -> dict[str, float]:
     """Returns {employee_name: kitchen_tip_amount}."""
 
     # T30 = FOH × 2/3 − cashier_paid
-    foh_card_tips   = _r(sum(r.card_tip for r in records if r.job == "FOH"))
-    cashier_paid    = _r(sum(r.cashier_tip for r in records if r.job == "Cashier"))
-    T30             = _r(foh_card_tips * cfg.CASHIER_FOH_PCT - cashier_paid)
+    foh_card_tips    = _r(sum(r.card_tip    for r in records if r.job == "FOH"))
+    cashier_paid     = _r(sum(r.cashier_tip for r in records if r.job == "Cashier"))
+    T30              = _r(foh_card_tips * cfg.CASHIER_FOH_PCT - cashier_paid)
 
-    # M22 = total server VAL from dine-in
+    # E3 = SUM(F55:F76) = total server VAL from tip records
     total_server_val = _r(sum(r.val for r in records if r.job == "Server"))
 
     # E89 = kitchen pool
     E89 = _r(total_server_val * cfg.KITCHEN_SERVER_VAL_FRACTION + T30)
 
-    # Accumulate kitchen hours per employee (from individual shifts)
     kitchen_hours: dict[str, float] = defaultdict(float)
     for s in shifts:
         if _role_cat(s.role) == "Kitchen":
             kitchen_hours[s.name] += s.total_hours
 
     total_k_hours = sum(kitchen_hours.values()) or 1.0
-
     return {
         name: _r(hours / total_k_hours * E89)
         for name, hours in kitchen_hours.items()
@@ -456,22 +453,55 @@ def compute_kitchen_tips(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6 – Sushi pool (placeholder – same structure as kitchen)
+# 6 – Sushi pool & distribution
+#
+# F3 = E3 × SUSHI_VAL_FRACTION (M24)
+#       + SUSHI_D123  (D123, pending confirmation)
+#       + IFNA(VLOOKUP("Sushi Chef", A55:I76, 9), 0)
+#            → col 9 = sum of (card_tip + gratuity) for sushi employees' orders
+#
+# Per-employee: Tip = G_i × F3 / SUM(G)   where G = hours × multiplier (H)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_sushi_tips(
     shifts: list[Shift],
+    records: list[ServerShiftTip],
 ) -> dict[str, float]:
-    """
-    Sushi tip distribution.
-    Currently returns 0 for all – fill in once the sushi pool formula is confirmed.
-    """
-    sushi_hours: dict[str, float] = defaultdict(float)
+    """Returns {employee_name: sushi_tip_amount}."""
+
+    # Identify sushi employees from the timesheet
+    sushi_names = {s.name for s in shifts if _role_cat(s.role) == "Sushi"}
+
+    # IFNA(VLOOKUP("Sushi Chef", A55:I76, 9), 0)
+    # = card_tip + gratuity for POS orders attributed to sushi staff
+    sushi_direct = _r(sum(
+        r.card_tip + r.gratuity
+        for r in records
+        if r.job == "Server" and r.name in sushi_names
+    ))
+
+    # E3 = total server VAL (same as kitchen)
+    total_server_val = _r(sum(r.val for r in records if r.job == "Server"))
+
+    # F3 = sushi pool
+    sushi_pool = _r(
+        total_server_val * cfg.SUSHI_VAL_FRACTION
+        + cfg.SUSHI_D123
+        + sushi_direct
+    )
+
+    # G = hours × multiplier H  (weighted allocation)
+    weighted: dict[str, float] = defaultdict(float)
     for s in shifts:
         if _role_cat(s.role) == "Sushi":
-            sushi_hours[s.name] += s.total_hours
-    # TODO: determine sushi pool source and formula
-    return {name: 0.0 for name in sushi_hours}
+            mult = cfg.SUSHI_MULTIPLIERS.get(s.role.strip().lower(), 1.0)
+            weighted[s.name] += s.total_hours * mult
+
+    total_weight = sum(weighted.values()) or 1.0
+    return {
+        name: _r(w / total_weight * sushi_pool)
+        for name, w in weighted.items()
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -649,8 +679,8 @@ def run(ts_text: str, ord_text: str, period_end: date) -> dict:
     orders            = parse_orders(ord_text)
     tip_records       = compute_tips(orders)
     server_tips       = aggregate_server_tips(tip_records)
-    kitchen_tips      = compute_kitchen_tips(shifts, tip_records, ts_totals)
-    sushi_tips        = compute_sushi_tips(shifts)
+    kitchen_tips      = compute_kitchen_tips(shifts, tip_records)
+    sushi_tips        = compute_sushi_tips(shifts, tip_records)
     super_sheet       = build_super_sheet(ts_totals, server_tips, kitchen_tips, sushi_tips)
 
     all_dates    = [s.work_date for s in shifts if s.work_date]
@@ -669,10 +699,22 @@ def run(ts_text: str, ord_text: str, period_end: date) -> dict:
         "tip_records":     tip_records,
         "server_tips":     server_tips,
         "kitchen_tips":    kitchen_tips,
+        "sushi_tips":      sushi_tips,
         "foh_card_tips":   foh_ct,
         "foh_val":         foh_val,
         "T30":             _r(foh_ct * cfg.CASHIER_FOH_PCT
                                - sum(r.cashier_tip for r in tip_records if r.job == "Cashier")),
+        "sushi_pool":      _r(
+                               _r(sum(r.val for r in tip_records if r.job == "Server"))
+                               * cfg.SUSHI_VAL_FRACTION
+                               + cfg.SUSHI_D123
+                               + _r(sum(
+                                   r.card_tip + r.gratuity
+                                   for r in tip_records
+                                   if r.job == "Server"
+                                   and r.name in {s.name for s in shifts if _role_cat(s.role) == "Sushi"}
+                               ))
+                           ),
     }
 
 
@@ -680,9 +722,10 @@ def print_summary(result: dict) -> None:
     print(f"\n{'='*65}")
     print(f"  Payroll  {result['period_start']}  →  {result['period_end']}")
     print(f"{'='*65}")
-    print(f"\n  FOH Card Tips : ${result['foh_card_tips']:>8,.2f}")
-    print(f"  FOH VAL (1/3) : ${result['foh_val']:>8,.2f}")
-    print(f"  T30 (kitchen) : ${result['T30']:>8,.2f}")
+    print(f"\n  FOH Card Tips  : ${result['foh_card_tips']:>8,.2f}")
+    print(f"  FOH VAL (1/3)  : ${result['foh_val']:>8,.2f}")
+    print(f"  T30 (kitchen)  : ${result['T30']:>8,.2f}")
+    print(f"  Sushi pool (F3): ${result['sushi_pool']:>8,.2f}")
     print()
     print(f"  {'Name':<28} {'Hours':>7} {'OT':>6} {'Net Tip':>10} {'Total':>10}")
     print(f"  {'-'*63}")
